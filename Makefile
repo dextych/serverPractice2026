@@ -70,7 +70,7 @@ nft     = $(X) $(1) nft '$(2)'
 chk = @if $(X) $(2) $(3) >/dev/null 2>&1; then echo "[ OK ]  $(1)"; else echo "[FAIL]  $(1)"; fi
 neg = @if $(X) $(2) $(3) >/dev/null 2>&1; then echo "[FAIL]  $(1) (должно быть недоступно)"; else echo "[ OK ]  $(1): заблокировано, как и задумано"; fi
 
-.PHONY: help up down dpi netem netem-off mtu test test-dpi show cap sh deps
+.PHONY: help up down dpi netem netem-off mtu test test-dpi test-dpi-nebula show cap sh deps
 
 help:
 	@echo "Цели (всё через sudo):"
@@ -169,12 +169,19 @@ ifeq ($(DPI_MODE),sig)
 	@$(X) $(DPI) nft 'add rule inet dpi forward udp length 156 @th,64,32 0x01000000 counter drop comment "wg-init"'
 	@$(X) $(DPI) nft 'add rule inet dpi forward udp length 92 @th,64,32 0x02000000 counter drop comment "wg-resp"'
 	@echo "DPI: режим sig (режем WG-хендшейки)"
+else ifeq ($(DPI_MODE),nebula)
+	@# Nebula header: [ver<<4|type][subtype][reserved 2B][remote_idx 4B][counter 8B]
+	@# handshake = ver1/type0/subtype0 -> первые 4 байта payload = 10 00 00 00
+	@# UDP-заголовок = 8 байт = 64 бита, поэтому payload начинается с @th,64
+	@$(X) $(DPI) nft 'add rule inet dpi forward meta l4proto udp @th,64,32 { 0x10000000, 0x11000000 } counter drop comment "nebula-all"'
+	@echo "DPI: режим nebula (режем хендшейки Nebula)"
 else ifeq ($(DPI_MODE),whitelist)
 	@$(X) $(DPI) nft 'add rule inet dpi forward udp dport != { 53, 443 } counter drop comment "udp-whitelist"'
 	@echo "DPI: режим whitelist (UDP только 53/443)"
 else
-	@echo "DPI: выключен"
+	@echo "DPI: режим off (фильтрация отключена)"
 endif
+
 
 # ---- параметры канала -------------------------------------------------------
 netem:
@@ -213,6 +220,11 @@ test:
 test-dpi:
 	@echo "=== Шлём 3+3 пакета, похожих на WG initiation (UDP len 156, тип 1) ==="
 	@$(X) $(HA) python3 -c "import socket as k; p=bytes([1,0,0,0])+bytes(144); [k.socket(f,k.SOCK_DGRAM).sendto(p,(a,51820)) for f,a in ((k.AF_INET,'203.0.113.10'),(k.AF_INET6,'2001:db8:100::10')) for _ in range(3)]"
+	@$(X) $(DPI) nft list table inet dpi
+
+test-dpi-nebula:
+	@echo "=== 3+3 Nebula-подобных пакета (handshake 0x10 и data 0x11), v4+v6 ==="
+	@$(X) $(HA) python3 -c "import socket as k; hs=bytes([16,0,0,0])+bytes(4)+(1).to_bytes(8,'big')+bytes(184); dt=bytes([17,0,0,0])+bytes(4)+(2).to_bytes(8,'big')+bytes(184); [k.socket(f,k.SOCK_DGRAM).sendto(p,(a,4242)) for f,a in ((k.AF_INET,'203.0.113.10'),(k.AF_INET6,'2001:db8:100::10')) for p in (hs,dt) for _ in range(3)]"
 	@$(X) $(DPI) nft list table inet dpi
 
 # ---- отладка ----------------------------------------------------------------
