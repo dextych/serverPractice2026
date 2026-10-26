@@ -19,10 +19,65 @@
 # ULA здесь не годится: без NPTv6 ctrl не знает обратный маршрут, поэтому 2001:db8::/32.
 #
 # Параметры:  make up DPI_MODE=whitelist NETEM="delay 50ms 10ms loss 1%"
-#             make dpi DPI_MODE=sig|whitelist|off     (переприменить DPI без пересборки)
+#             make dpi DPI_MODE=sig|whitelist|nebula|off     (переприменить DPI без пересборки)
 #             make mtu WAN_MTU=1400
 # =============================================================================
 
+# =============================================================================
+# Где мы: на хосте (управляем контейнером) или внутри контейнера (сам стенд)
+#   хост:      make docker-up | docker-down | docker-sh | ...; остальные цели
+#              (up, test, nebula-up, ...) прозрачно выполняются внутри контейнера
+#   контейнер: обычный Makefile стенда (всё ниже, после else)
+# =============================================================================
+IN_CONTAINER ?= $(or $(wildcard /.dockerenv),$(wildcard /run/.containerenv))
+
+ifeq ($(IN_CONTAINER),)
+# ----------------------------- ХОСТ ------------------------------------------
+SHELL         := /bin/bash
+MAKEFLAGS     += --no-print-directory
+.DEFAULT_GOAL := help
+
+COMPOSE    ?= docker compose
+SVC        ?= stand
+EXEC_FLAGS ?=
+DEXEC       = $(COMPOSE) exec $(EXEC_FLAGS) $(SVC)
+
+# переменные из командной строки (DPI_MODE=..., NETEM=..., NEBULA_PORT=...) уходят внутрь
+CLIVARS = $(foreach v,$(.VARIABLES),$(if $(filter command line,$(origin $(v))),$(v)))
+FWDARGS = $(foreach v,$(CLIVARS),'$(v)=$($(v))')
+
+HOST_GOALS := help docker-up docker-down docker-build docker-sh docker-ps
+FWD_GOALS  := $(filter-out $(HOST_GOALS),$(MAKECMDGOALS))
+
+.PHONY: $(HOST_GOALS) $(FWD_GOALS)
+
+help:
+	@echo "Контейнер (с хоста, root не нужен, если ты в группе docker):"
+	@echo "  make docker-up     собрать образ и поднять контейнер"
+	@echo "  make docker-down   остановить и удалить контейнер (стенд и nebula сносятся вместе с ним)"
+	@echo "  make docker-build  только пересобрать образ"
+	@echo "  make docker-sh     bash внутри контейнера"
+	@echo "  make docker-ps     состояние контейнера"
+	@echo "Любая другая цель (up, test, nebula-up, sh N=..., ...) выполняется внутри контейнера."
+	@echo
+	@$(DEXEC) make help 2>/dev/null || echo "(контейнер не запущен: make docker-up)"
+
+docker-up:
+	$(COMPOSE) up -d --build
+docker-down:
+	$(COMPOSE) down
+docker-build:
+	$(COMPOSE) build
+docker-sh:
+	$(DEXEC) bash
+docker-ps:
+	$(COMPOSE) ps
+
+$(FWD_GOALS):
+	@$(DEXEC) make $@ $(FWDARGS)
+
+else
+# ------------------------- КОНТЕЙНЕР (стенд) ---------------------------------
 ifneq ($(shell id -u),0)
 ifneq ($(MAKECMDGOALS),help)
 $(error Запускать через sudo: sudo make up)
@@ -84,6 +139,9 @@ help:
 	@echo "  make show          адреса, маршруты, правила nft, conntrack"
 	@echo "  make cap N=ns_dpi IF=toA   tcpdump в нужном namespace"
 	@echo "  make sh N=ns_hostA         шелл внутри namespace"
+	@echo "  make nebula-up     поднять Nebula поверх стенда (NEBULA_PORT, NEBULA_V6, NEBULA_MTU ...)"
+	@echo "  make nebula-test   overlay-ping + путь hostA->hostB (direct/relay)"
+	@echo "  make nebula-status | nebula-logs NODE=hostA | nebula-down"
 
 deps:
 	@for c in ip nft tc ping; do command -v $$c >/dev/null || { echo "нет утилиты: $$c"; exit 1; }; done
@@ -155,7 +213,7 @@ up: deps down
 
 	@echo "=== [8/8] готово. Проверка: sudo make test ==="
 
-down:
+down: nebula-down
 	@echo "=== Удаление стенда ==="
 	-@for n in $(NS); do ip netns del $$n 2>/dev/null; done; true
 
@@ -176,12 +234,11 @@ else ifeq ($(DPI_MODE),nebula)
 	@$(X) $(DPI) nft 'add rule inet dpi forward meta l4proto udp @th,64,32 { 0x10000000, 0x11000000 } counter drop comment "nebula-all"'
 	@echo "DPI: режим nebula (режем хендшейки Nebula)"
 else ifeq ($(DPI_MODE),whitelist)
-	@$(X) $(DPI) nft 'add rule inet dpi forward udp dport != { 53, 443 } counter drop comment "udp-whitelist"'
+	@$(X) $(DPI) nft 'add rule inet dpi forward udp dport != { 53, 443 } udp sport != { 53, 443 } counter drop comment "udp-whitelist"'
 	@echo "DPI: режим whitelist (UDP только 53/443)"
 else
 	@echo "DPI: режим off (фильтрация отключена)"
 endif
-
 
 # ---- параметры канала -------------------------------------------------------
 netem:
@@ -240,3 +297,21 @@ cap:
 
 sh:
 	$(X) $(N) bash
+
+# ---- Nebula (nebula.sh) -------------------------------------------------
+NEBULA_SH ?= ./nebula.sh
+NODE      ?= hostA
+
+.PHONY: nebula-up nebula-down nebula-test nebula-status nebula-logs
+nebula-up:
+	@$(NEBULA_SH) up
+nebula-down:
+	-@$(NEBULA_SH) down 2>/dev/null
+nebula-test:
+	@$(NEBULA_SH) test
+nebula-status:
+	@$(NEBULA_SH) status
+nebula-logs:
+	@$(NEBULA_SH) logs $(NODE)
+
+endif
