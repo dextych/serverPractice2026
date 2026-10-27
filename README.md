@@ -15,10 +15,11 @@
 6. [Параметры](#параметры)
 7. [Как работать со стендом](#как-работать-со-стендом)
 8. [Nebula поверх стенда](#nebula-поверх-стенда)
-9. [Сценарии экспериментов](#сценарии-экспериментов)
-10. [Устройство NAT и DPI](#устройство-nat-и-dpi)
-11. [Частые проблемы](#частые-проблемы)
-12. [Ограничения](#ограничения)
+9. [AmneziaWG](#amneziawg)
+10. [Сценарии экспериментов](#сценарии-экспериментов)
+11. [Устройство NAT и DPI](#устройство-nat-и-dpi)
+12. [Частые проблемы](#частые-проблемы)
+13. [Ограничения](#ограничения)
 
 ## Требования
 
@@ -26,7 +27,7 @@
 
 - Linux, Docker и плагин Compose (`docker compose`), `make`.
 - Пользователь в группе `docker` (иначе `sudo make docker-up`). `sudo` для остальных целей не нужен: они выполняются внутри контейнера от root.
-- Ядро хоста с нужными опциями (контейнер использует ядро хоста, образ их не принесёт): `CONFIG_NET_NS`, `VETH`, `BRIDGE`, `NF_TABLES`, `NFT_NAT`, `NFT_MASQ`, `NF_CONNTRACK`, `NET_SCH_NETEM`, а для Nebula ещё `TUN` (и существующий `/dev/net/tun`).
+- Ядро хоста с нужными опциями (контейнер использует ядро хоста, образ их не принесёт): `CONFIG_NET_NS`, `VETH`, `BRIDGE`, `NF_TABLES`, `NFT_NAT`, `NFT_MASQ`, `NF_CONNTRACK`, `NET_SCH_NETEM`, а для Nebula и AmneziaWG ещё `TUN` (и существующий `/dev/net/tun`).
   Для DPI на Suricata дополнительно `NFT_QUEUE`.
 
 Быстрая проверка ядра:
@@ -48,6 +49,7 @@ ls -l /dev/net/tun
 |---|---|
 | `Makefile` | на хосте управляет контейнером, внутри контейнера строит и обслуживает стенд |
 | `nebula.sh` | поднимает Nebula-overlay поверх стенда (сертификаты, конфиги, запуск, тесты) |
+| `awg.sh` | поднимает AmneziaWG между `hostA` и `relay1`, генерирует локальные ключи и проверяет туннель |
 | `Dockerfile` | образ: Debian bookworm-slim, утилиты, Nebula 1.9.7 с проверкой sha256 |
 | `docker-compose.yml` | сервис `stand` (контейнер `mesh-stand`), `privileged`, репозиторий монтируется в `/stand` |
 | `README.md` | этот файл |
@@ -101,6 +103,7 @@ make test           # проверить связность и NAT/firewall
 make test-dpi       # убедиться, что DPI режет WireGuard-подобные пакеты
 make nebula-up      # поднять Nebula-overlay
 make nebula-test    # проверить overlay и путь hostA -> hostB (direct/relay)
+make awg-test       # проверить AmneziaWG hostA -> relay1 через NAT/DPI
 make docker-down    # снести всё вместе с контейнером
 ```
 
@@ -151,6 +154,10 @@ make docker-down    # снести всё вместе с контейнером
 | `make nebula-status` | интерфейсы `nebula1` во всех namespace'ах |
 | `make nebula-logs NODE=hostA` | лог ноды (`lh`, `relay1`, `relay2`, `hostA`, `hostB`) |
 | `make nebula-down` | остановить Nebula (стенд остаётся) |
+| `make awg-up [AWG_PORT=443]` | поднять AmneziaWG между `hostA` и `relay1` |
+| `make awg-test [AWG_PORT=443]` | поднять туннель, проверить ping и вывести состояние |
+| `make awg-status` | состояние AWG-интерфейсов и последнего handshake |
+| `make awg-down` | остановить AmneziaWG (стенд остаётся) |
 
 ## Параметры
 
@@ -282,6 +289,80 @@ Firewall внутри overlay в конфигах открыт полность�
 ### MTU
 
 Накладные расходы Nebula: около 32 байт собственного заголовка и тега плюс UDP и IP (всего около 60 байт по IPv4 и 80 по IPv6). При `WAN_MTU=1400` потолок для `NEBULA_MTU` около 1340 по IPv4 и 1320 по IPv6.
+
+## Nebula поверх AmneziaWG
+
+По умолчанию (`NEBULA_TRANSPORT=awg`) Nebula работает **внутри** AmneziaWG, а не рядом с ним.
+`make nebula-up` сам поднимает underlay `10.67.0.0/24`, затем стартует Nebula. Каждая нода биндит
+UDP-сокет на свой адрес underlay, поэтому её пакеты физически не могут уйти в `eth0` мимо AWG.
+На проводе (на `ns_dpi`) остаётся только AWG на `AWG_PORT`.
+
+```text
+overlay Nebula     100.64.0.x        lighthouse / relay / хосты
+underlay AWG       10.67.0.x         u-lh, u-r1, u-r2, u-hA, u-hB
+сеть стенда        NAT, DPI, netem   видны только UDP/AWG_PORT
+```
+
+| Underlay | Пиры |
+|----------|------|
+| хабы `lh`, `relay1`, `relay2` | полносвязны между собой, слушают `AWG_PORT` |
+| клиенты `hostA`, `hostB` | к каждому хабу, `PersistentKeepalive 25` (держит маппинг в NAT) |
+| `hostA` <-> `hostB` | **пира нет**: WireGuard не умеет hole punching, а natB его ломает. Overlay между клиентами идёт через Nebula-relay, и этот relay-трафик тоже внутри AWG |
+
+Nebula-ноды анонсируют lighthouse'у только адрес underlay (`local_allow_list`), а хосты ходят
+только к хабам (`remote_allow_list`), поэтому к соседу напрямую не лезут.
+
+```bash
+make up DPI_MODE=sig
+make nebula-up
+make nebula-test         # overlay-ping + проверка утечек мимо AWG
+
+# белый список UDP/443: теперь порт важен только для AWG
+make dpi DPI_MODE=whitelist
+make nebula-up AWG_PORT=443
+
+# DPI режет сигнатуры Nebula: в режиме awg handshake'и снаружи не видны
+make dpi DPI_MODE=nebula
+make nebula-up
+make nebula-test         # проходит; счётчик nebula-all на dpi остаётся 0
+
+# базовая линия для сравнения (старое поведение, Nebula рядом с AWG)
+make nebula-up NEBULA_TRANSPORT=raw
+```
+
+Что проверяет `nebula-test` в режиме `awg`:
+
+1. overlay-ping между нодами;
+2. на `ns_dpi` не должно быть ни одного UDP-пакета, у которого ни sport, ни dport не равны `AWG_PORT`;
+3. контрольный счёт: AWG-пакеты на проводе есть (иначе проверка слепая);
+4. между внешними адресами natA и natB нет прямого трафика: `hostA -> hostB` идёт только через relay.
+
+Параметры: `NEBULA_TRANSPORT=awg|raw`, `AWG_PORT` (по умолчанию 51820), `AWG_MTU` (по умолчанию 1420).
+MTU: `AWG_MTU <= WAN_MTU - 80`, `NEBULA_MTU <= AWG_MTU - 60`. При `WAN_MTU=1400`: `AWG_MTU=1320`, `NEBULA_MTU<=1260`.
+Underlay только IPv4, `NEBULA_V6` в режиме `awg` игнорируется. Underlay гасится `make awg-down`
+(`make nebula-down` останавливает только Nebula).
+`make awg-mesh-test` проверяет сам underlay отдельно от Nebula.
+
+## AmneziaWG
+
+`awg.sh` поднимает реальный туннель AmneziaWG между `ns_hostA` и `ns_relay1`. Пакеты проходят через `ns_natA` и `ns_dpi`, поэтому можно проверить работу обфускации в уже существующей топологии. Образ собирает `amneziawg-go` и соответствующие `awg`/`awg-quick` из официальных репозиториев при `make docker-up`. Если в ядре хоста нет модуля AmneziaWG, `awg-quick` использует userspace fallback; нужен доступ к `/dev/net/tun`. Если модуль есть, `awg-quick` предпочитает его, поэтому он должен поддерживать параметры конфигурации.
+
+```bash
+make docker-up
+make up DPI_MODE=sig
+make awg-test
+
+# Проверка UDP-whitelist: сервер слушает UDP/443
+make dpi DPI_MODE=whitelist
+make awg-test AWG_PORT=443
+
+make awg-status
+make awg-down
+```
+
+`awg-test` пересоздаёт туннель, чтобы применить переданный `AWG_PORT`. Ключи и конфиги генерируются в `/var/tmp/awg-lab` внутри контейнера и не коммитятся в репозиторий. Они переживают перезапуск контейнера, пока не удалён сам контейнер. При `DPI_MODE=sig` обычная сигнатура WireGuard должна блокироваться, а AmneziaWG с изменёнными заголовками и padding должен проходить. При `DPI_MODE=whitelist` используй `AWG_PORT=443`.
+
+Это лабораторный тест сигнатур, а не гарантия обхода любого DPI: эвристики и активные пробы могут обнаруживать разные варианты транспорта. Сейчас туннель намеренно ограничен маршрутом `10.66.0.0/24` между `hostA` и `relay1`; он не меняет default route и не является полнотуннельным VPN.
 
 ## Сценарии экспериментов
 
@@ -435,7 +516,6 @@ make dpi                                                # с хоста, либ�
 - Контейнер запускается с `privileged: true`: пользователю, который может им управлять, доступен весь хост. Для лабораторной машины это нормально, для общих систем нет.
 - Стенд и Nebula-сертификаты не сохраняются между пересозданиями контейнера и рассчитаны на одну машину.
 - Firewall внутри Nebula-overlay открыт полностью, это лабораторный режим.
-
 ### Машинный интерфейс управления (control contract v1)
 
 Для интеграции со сторонним backend добавлен read-only JSON-интерфейс. Он
@@ -454,5 +534,5 @@ python3 ./scripts/control.py status --json
 python3 -m unittest discover -s tests -v
 ```
 
-Полная спецификация формата: [`docs/control-contract.md`](docs/control-contract.md).
+Полная спецификация формата на русском языке: [`docs/control-contract.md`](docs/control-contract.md).
 Динамическое создание и удаление узлов пока не поддерживаются.
