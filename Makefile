@@ -41,6 +41,7 @@ COMPOSE    ?= docker compose
 SVC        ?= stand
 EXEC_FLAGS ?=
 DEXEC       = $(COMPOSE) exec $(EXEC_FLAGS) $(SVC)
+DEXEC_NTTY  = $(COMPOSE) exec -T $(EXEC_FLAGS) $(SVC)
 
 # переменные из командной строки (DPI_MODE=..., NETEM=..., NEBULA_PORT=...) уходят внутрь
 CLIVARS = $(foreach v,$(.VARIABLES),$(if $(filter command line,$(origin $(v))),$(v)))
@@ -50,6 +51,9 @@ HOST_GOALS := help docker-up docker-down docker-build docker-sh docker-ps
 FWD_GOALS  := $(filter-out $(HOST_GOALS),$(MAKECMDGOALS))
 
 .PHONY: $(HOST_GOALS) $(FWD_GOALS)
+
+$(FWD_GOALS):
+	@$(DEXEC_NTTY) make $@ $(FWDARGS)
 
 help:
 	@echo "Контейнер (с хоста, root не нужен, если ты в группе docker):"
@@ -72,9 +76,6 @@ docker-sh:
 	$(DEXEC) bash
 docker-ps:
 	$(COMPOSE) ps
-
-$(FWD_GOALS):
-	@$(DEXEC) make $@ $(FWDARGS)
 
 else
 # ------------------------- КОНТЕЙНЕР (стенд) ---------------------------------
@@ -125,7 +126,7 @@ nft     = $(X) $(1) nft '$(2)'
 chk = @if $(X) $(2) $(3) >/dev/null 2>&1; then echo "[ OK ]  $(1)"; else echo "[FAIL]  $(1)"; fi
 neg = @if $(X) $(2) $(3) >/dev/null 2>&1; then echo "[FAIL]  $(1) (должно быть недоступно)"; else echo "[ OK ]  $(1): заблокировано, как и задумано"; fi
 
-.PHONY: help up down dpi netem netem-off mtu test test-dpi test-dpi-nebula show cap sh deps
+.PHONY: help up down dpi netem netem-off mtu test test-dpi test-dpi-nebula show cap sh deps control-topology control-status awg-up awg-down awg-test awg-status awg-mesh-up awg-mesh-test awg-mesh-status
 
 help:
 	@echo "Цели (всё через sudo):"
@@ -139,9 +140,14 @@ help:
 	@echo "  make show          адреса, маршруты, правила nft, conntrack"
 	@echo "  make cap N=ns_dpi IF=toA   tcpdump в нужном namespace"
 	@echo "  make sh N=ns_hostA         шелл внутри namespace"
-	@echo "  make nebula-up     поднять Nebula поверх стенда (NEBULA_PORT, NEBULA_V6, NEBULA_MTU ...)"
+	@echo "  make nebula-up [NEBULA_TRANSPORT=awg|raw] [AWG_PORT=443]   Nebula внутри AWG (по умолчанию) или напрямую"
 	@echo "  make nebula-test   overlay-ping + путь hostA->hostB (direct/relay)"
 	@echo "  make nebula-status | nebula-logs NODE=hostA | nebula-down"
+	@echo "  make awg-test [AWG_PORT=443]  AmneziaWG hostA -> relay1 через NAT/DPI"
+	@echo "  make awg-status | awg-down"
+	@echo "  make control-topology  JSON-описание текущей топологии для backend"
+	@echo "  make control-status    фактическое состояние стенда в JSON"
+	@echo " make awg-mesh-up | awg-mesh-test | awg-mesh-status   AWG-underlay для Nebula (10.67.0.0/24)"
 
 deps:
 	@for c in ip nft tc ping; do command -v $$c >/dev/null || { echo "нет утилиты: $$c"; exit 1; }; done
@@ -213,7 +219,7 @@ up: deps down
 
 	@echo "=== [8/8] готово. Проверка: sudo make test ==="
 
-down: nebula-down
+down: nebula-down awg-down
 	@echo "=== Удаление стенда ==="
 	-@for n in $(NS); do ip netns del $$n 2>/dev/null; done; true
 
@@ -313,5 +319,32 @@ nebula-status:
 	@$(NEBULA_SH) status
 nebula-logs:
 	@$(NEBULA_SH) logs $(NODE)
+
+# ---- AmneziaWG: userspace-туннель hostA -> relay1 ----------------------------
+AWG_SH   ?= ./awg.sh
+AWG_PORT ?= 51820
+awg-up:
+	@AWG_PORT=$(AWG_PORT) $(AWG_SH) up
+awg-down:
+	-@$(AWG_SH) down 2>/dev/null
+awg-test:
+	@AWG_PORT=$(AWG_PORT) $(AWG_SH) up
+	@$(AWG_SH) test
+awg-status:
+	@$(AWG_SH) status
+awg-mesh-up:
+	@AWG_PORT=$(AWG_PORT) $(AWG_SH) mesh-up
+awg-mesh-test:
+	@AWG_PORT=$(AWG_PORT) $(AWG_SH) mesh-up
+	@$(AWG_SH) mesh-test
+awg-mesh-status:
+	@$(AWG_SH) mesh-status
+
+# ---- Control contract (read-only JSON interface) ----------------------------
+control-topology:
+	@python3 ./scripts/control.py topology --json
+
+control-status:
+	@python3 ./scripts/control.py status --json
 
 endif
