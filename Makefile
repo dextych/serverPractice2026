@@ -125,7 +125,7 @@ nft     = $(X) $(1) nft '$(2)'
 chk = @if $(X) $(2) $(3) >/dev/null 2>&1; then echo "[ OK ]  $(1)"; else echo "[FAIL]  $(1)"; fi
 neg = @if $(X) $(2) $(3) >/dev/null 2>&1; then echo "[FAIL]  $(1) (должно быть недоступно)"; else echo "[ OK ]  $(1): заблокировано, как и задумано"; fi
 
-.PHONY: help up down dpi netem netem-off mtu test test-dpi test-dpi-nebula show cap sh deps
+.PHONY: help up down dpi netem netem-off mtu test test-dpi test-dpi-nebula show cap sh deps control-topology control-status
 
 help:
 	@echo "Цели (всё через sudo):"
@@ -142,6 +142,8 @@ help:
 	@echo "  make nebula-up     поднять Nebula поверх стенда (NEBULA_PORT, NEBULA_V6, NEBULA_MTU ...)"
 	@echo "  make nebula-test   overlay-ping + путь hostA->hostB (direct/relay)"
 	@echo "  make nebula-status | nebula-logs NODE=hostA | nebula-down"
+	@echo "  make control-topology  JSON-описание текущей топологии для backend"
+	@echo "  make control-status    фактическое состояние стенда в JSON"
 
 deps:
 	@for c in ip nft tc ping; do command -v $$c >/dev/null || { echo "нет утилиты: $$c"; exit 1; }; done
@@ -313,5 +315,13 @@ nebula-status:
 	@$(NEBULA_SH) status
 nebula-logs:
 	@$(NEBULA_SH) logs $(NODE)
+
+# ---- Контракт управления: интерфейс JSON только для чтения -------------------
+control-topology:
+	@python3 ./scripts/control.py topology --json
+
+control-status:
+	@python3 ./scripts/control.py status --json
+
 
 endif
