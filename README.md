@@ -290,6 +290,59 @@ Firewall внутри overlay в конфигах открыт полность�
 
 Накладные расходы Nebula: около 32 байт собственного заголовка и тега плюс UDP и IP (всего около 60 байт по IPv4 и 80 по IPv6). При `WAN_MTU=1400` потолок для `NEBULA_MTU` около 1340 по IPv4 и 1320 по IPv6.
 
+## Nebula поверх AmneziaWG
+
+По умолчанию (`NEBULA_TRANSPORT=awg`) Nebula работает **внутри** AmneziaWG, а не рядом с ним.
+`make nebula-up` сам поднимает underlay `10.67.0.0/24`, затем стартует Nebula. Каждая нода биндит
+UDP-сокет на свой адрес underlay, поэтому её пакеты физически не могут уйти в `eth0` мимо AWG.
+На проводе (на `ns_dpi`) остаётся только AWG на `AWG_PORT`.
+
+```text
+overlay Nebula     100.64.0.x        lighthouse / relay / хосты
+underlay AWG       10.67.0.x         u-lh, u-r1, u-r2, u-hA, u-hB
+сеть стенда        NAT, DPI, netem   видны только UDP/AWG_PORT
+```
+
+| Underlay | Пиры |
+|----------|------|
+| хабы `lh`, `relay1`, `relay2` | полносвязны между собой, слушают `AWG_PORT` |
+| клиенты `hostA`, `hostB` | к каждому хабу, `PersistentKeepalive 25` (держит маппинг в NAT) |
+| `hostA` <-> `hostB` | **пира нет**: WireGuard не умеет hole punching, а natB его ломает. Overlay между клиентами идёт через Nebula-relay, и этот relay-трафик тоже внутри AWG |
+
+Nebula-ноды анонсируют lighthouse'у только адрес underlay (`local_allow_list`), а хосты ходят
+только к хабам (`remote_allow_list`), поэтому к соседу напрямую не лезут.
+
+```bash
+make up DPI_MODE=sig
+make nebula-up
+make nebula-test         # overlay-ping + проверка утечек мимо AWG
+
+# белый список UDP/443: теперь порт важен только для AWG
+make dpi DPI_MODE=whitelist
+make nebula-up AWG_PORT=443
+
+# DPI режет сигнатуры Nebula: в режиме awg handshake'и снаружи не видны
+make dpi DPI_MODE=nebula
+make nebula-up
+make nebula-test         # проходит; счётчик nebula-all на dpi остаётся 0
+
+# базовая линия для сравнения (старое поведение, Nebula рядом с AWG)
+make nebula-up NEBULA_TRANSPORT=raw
+```
+
+Что проверяет `nebula-test` в режиме `awg`:
+
+1. overlay-ping между нодами;
+2. на `ns_dpi` не должно быть ни одного UDP-пакета, у которого ни sport, ни dport не равны `AWG_PORT`;
+3. контрольный счёт: AWG-пакеты на проводе есть (иначе проверка слепая);
+4. между внешними адресами natA и natB нет прямого трафика: `hostA -> hostB` идёт только через relay.
+
+Параметры: `NEBULA_TRANSPORT=awg|raw`, `AWG_PORT` (по умолчанию 51820), `AWG_MTU` (по умолчанию 1420).
+MTU: `AWG_MTU <= WAN_MTU - 80`, `NEBULA_MTU <= AWG_MTU - 60`. При `WAN_MTU=1400`: `AWG_MTU=1320`, `NEBULA_MTU<=1260`.
+Underlay только IPv4, `NEBULA_V6` в режиме `awg` игнорируется. Underlay гасится `make awg-down`
+(`make nebula-down` останавливает только Nebula).
+`make awg-mesh-test` проверяет сам underlay отдельно от Nebula.
+
 ## AmneziaWG
 
 `awg.sh` поднимает реальный туннель AmneziaWG между `ns_hostA` и `ns_relay1`. Пакеты проходят через `ns_natA` и `ns_dpi`, поэтому можно проверить работу обфускации в уже существующей топологии. Образ собирает `amneziawg-go` и соответствующие `awg`/`awg-quick` из официальных репозиториев при `make docker-up`. Если в ядре хоста нет модуля AmneziaWG, `awg-quick` использует userspace fallback; нужен доступ к `/dev/net/tun`. Если модуль есть, `awg-quick` предпочитает его, поэтому он должен поддерживать параметры конфигурации.
