@@ -165,38 +165,139 @@ status() {
 # Прямой путь hostA->hostB виден на dpi: зашифрованные пакеты (>150 байт, не 1-байтовые punch'и)
 # между внешними адресами natA и natB. Если их нет — трафик идёт через relay.
 path() {
-  local out tp
-  out=$(mktemp)
-  $X ns_dpi timeout 10 tcpdump -ni toA -l -c1 \
-    'udp and greater 150 and ((src 192.0.2.2 and dst 198.51.100.2) or (src 2001:db8:a1::2 and dst 2001:db8:b1::2))' \
-    >"$out" 2>&1 &
-  tp=$!
-  sleep 1
-  $X ns_hostA ping -c5 -i 0.3 -W2 -s 200 "${OV[hostB]}" >/dev/null 2>&1 || true
-  sleep 1
-  kill "$tp" 2>/dev/null || true
-  wait "$tp" 2>/dev/null || true
-  if grep -q ' > ' "$out"; then
-    echo "путь hostA->hostB: ПРЯМОЙ  ($(grep ' > ' "$out" | head -n1 | awk '{print $2, $3, $4}'))"
-  else
-    echo "путь hostA->hostB: через RELAY (прямых пакетов между natA и natB нет)"
-  fi
-  rm -f "$out"
-}
+  local family filter out tp n seen=0
+  local -a captures=()
 
-run_test() {
-  local pair
-  echo "=== overlay-ping ==="
-  for pair in "hostA lh" "hostB lh" "hostA relay1" "hostB relay2" "hostA hostB" "hostB hostA"; do
-    set -- $pair
-    if $X "${NS[$1]}" ping -c3 -W2 -s 200 "${OV[$2]}" >/dev/null 2>&1; then
-      echo "[ OK ]  $1 -> $2 (${OV[$2]})"
+  echo "=== определение пути hostA -> hostB ==="
+
+  for family in ipv4 ipv6; do
+    if [[ $family == ipv4 ]]; then
+      filter='udp and greater 150 and
+        ((src 192.0.2.2 and dst 198.51.100.2) or
+         (src 198.51.100.2 and dst 192.0.2.2))'
     else
-      echo "[FAIL]  $1 -> $2 (${OV[$2]})"
+      [[ $V6 == 1 ]] || {
+        echo "[SKIP] IPv6 transport отключён (NEBULA_V6=0)"
+        continue
+      }
+
+      filter='ip6 and udp and greater 150 and
+        ((src 2001:db8:a1::2 and dst 2001:db8:b1::2) or
+         (src 2001:db8:b1::2 and dst 2001:db8:a1::2))'
+    fi
+
+    out=$(mktemp)
+    captures+=("$out")
+
+    echo "--- $family ---"
+
+    # Слушаем внешний интерфейс DPI, через который проходит трафик hostA.
+    $X ns_dpi timeout 10 tcpdump -nn -i toA -l \
+      "$filter" >"$out" 2>&1 &
+    tp=$!
+
+    sleep 1
+
+    # Пакеты достаточно большие, чтобы отличать полезный трафик
+    # от коротких пакетов проверки NAT traversal.
+    $X ns_hostA ping -c 8 -i 0.3 -W 2 -s 200 \
+      "${OV[hostB]}" >/dev/null 2>&1 || true
+
+    sleep 1
+    kill "$tp" 2>/dev/null || true
+    wait "$tp" 2>/dev/null || true
+
+    if grep -q ' > ' "$out"; then
+      echo "[DIRECT] Обнаружен прямой внешний $family трафик"
+      grep ' > ' "$out" | head -n 3
+      seen=1
+    else
+      echo "[INFO] Прямой $family трафик между hostA и hostB не обнаружен"
     fi
   done
-  echo "=== путь ==="
+
+  if (( seen )); then
+    echo "Итог: прямой путь обнаружен хотя бы для одного IP-протокола."
+    echo "Примечание: наличие прямого трафика не исключает relay для другого семейства."
+  else
+    echo "Итог: прямой путь не обнаружен; вероятен relay."
+    echo "Проверь адреса NAT, интерфейс toA и tcpdump."
+  fi
+
+  for out in "${captures[@]}"; do
+    rm -f "$out"
+  done
+}   
+
+run_test() {
+  local pair src dst ok=0 fail=0 skipped=0
+
+  echo "=== overlay IPv4 ping ==="
+
+  for pair in \
+    "hostA lh" \
+    "hostB lh" \
+    "hostA relay1" \
+    "hostB relay2" \
+    "hostA hostB" \
+    "hostB hostA"
+  do
+    read -r src dst <<< "$pair"
+
+    if $X "${NS[$src]}" ping -4 -c 3 -W 2 -s 200 \
+      "${OV[$dst]}" >/dev/null 2>&1; then
+      echo "[ OK ]  $src -> $dst (${OV[$dst]})"
+      ((ok+=1))
+    else
+      echo "[FAIL]  $src -> $dst (${OV[$dst]})"
+      ((fail+=1))
+    fi
+  done
+
+  echo
+  echo "=== IPv6 transport configuration ==="
+
+  if [[ $V6 == 1 ]]; then
+    echo "[INFO] IPv6 включён в конфигурации Nebula."
+    echo "[INFO] Проверяем доступность IPv6-маршрутов и адресов внешней сети."
+
+    for n in "${ORDER[@]}"; do
+      printf '%-7s ' "$n"
+      if $X "${NS[$n]}" ip -6 addr show 2>/dev/null |
+        grep -q 'inet6 '; then
+        echo "[ OK ] IPv6-адреса присутствуют"
+      else
+        echo "[WARN] IPv6-адреса не обнаружены"
+      fi
+    done
+
+    echo
+    echo "Проверка IPv6-сокетов Nebula:"
+    for n in "${ORDER[@]}"; do
+      printf '%-7s ' "$n"
+      if $X "${NS[$n]}" ss -H -lun 2>/dev/null |
+        grep -Eq '(\[::\]|:::|\*:)' ; then
+        echo "[INFO] Найден IPv6 UDP-сокет"
+      else
+        echo "[WARN] IPv6 UDP-сокет не найден или недоступен"
+      fi
+    done
+  else
+    echo "[SKIP] NEBULA_V6=0, IPv6 transport отключён."
+    ((skipped+=1))
+  fi
+
+  echo
+  echo "=== путь hostA -> hostB ==="
   path
+
+  echo
+  echo "=== итоги ==="
+  echo "Успешные overlay-проверки: $ok"
+  echo "Ошибки overlay-проверок:   $fail"
+  echo "Пропущенные проверки:      $skipped"
+
+  (( fail == 0 ))
 }
 
 [[ $EUID -eq 0 ]] || { echo "нужен root: sudo $0 $*"; exit 1; }

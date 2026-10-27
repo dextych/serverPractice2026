@@ -2,8 +2,8 @@ services:
   stand:
     build: .
     container_name: mesh-stand
-    privileged: true     # netns + sysctl в них + /dev/net/tun
-    init: true           # нормальный reaping процессов nebula/tcpdump
+    privileged: true
+    init: true           
     tty: true
     volumes:
-      - ./:/stand          # Makefile, README.md, nebula.sh;
+      - ./:/stand
