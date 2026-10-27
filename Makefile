@@ -147,7 +147,7 @@ help:
 	@echo "  make awg-status | awg-down"
 	@echo "  make control-topology  JSON-описание текущей топологии для backend"
 	@echo "  make control-status    фактическое состояние стенда в JSON"
-	@echo " make awg-mesh-up | awg-mesh-test | awg-mesh-status   AWG-underlay для Nebula (10.67.0.0/24)"
+	@echo "  make awg-mesh-up | awg-mesh-test | awg-mesh-status   AWG-underlay для Nebula (10.67.0.0/24)"
 
 deps:
 	@for c in ip nft tc ping; do command -v $$c >/dev/null || { echo "нет утилиты: $$c"; exit 1; }; done

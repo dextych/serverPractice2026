@@ -534,5 +534,5 @@ python3 ./scripts/control.py status --json
 python3 -m unittest discover -s tests -v
 ```
 
-Полная спецификация формата на русском языке: [`docs/control-contract.md`](docs/control-contract.md).
+Полная спецификация формата: [`docs/control-contract.md`](docs/control-contract.md).
 Динамическое создание и удаление узлов пока не поддерживаются.
