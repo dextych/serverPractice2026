@@ -1,9 +1,0 @@
-services:
-  stand:
-    build: .
-    container_name: mesh-stand
-    privileged: true
-    init: true           
-    tty: true
-    volumes:
-      - ./:/stand
