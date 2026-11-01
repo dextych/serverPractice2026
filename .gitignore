@@ -1,0 +1,15 @@
+node_modules/
+package-lock.json
+
+.env
+logs/
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+coverage/
+.nyc_output/
+
+stand/
