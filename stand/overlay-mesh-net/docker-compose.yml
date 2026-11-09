@@ -1,0 +1,23 @@
+services:
+  stand:
+    build: .
+    container_name: mesh-stand
+    privileged: true
+    init: true
+    tty: true
+    volumes:
+      - ./:/stand
+
+  api:
+    build: ../../api
+    container_name: mesh-api
+    ports:
+      - "3030:3030"
+    environment:
+      - PORT=3030
+      - API_SECRET_TOKEN=mesh_secret_token_2026_xyz
+      - STORAGE_DB=/app/database.sqlite
+      - MODELS_DIR=/app/src/models
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
